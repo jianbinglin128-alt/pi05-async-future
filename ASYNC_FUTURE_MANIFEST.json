@@ -1,0 +1,20 @@
+{
+  "created_at": "2026-11-11T22:39:21.593024",
+  "source_repo": "/home/lin/data/openpi/repo-async-libero",
+  "repo": "/home/lin/data/openpi/repo-async-future",
+  "config": "pi05_libero_async_future",
+  "initialization": "/home/lin/data/openpi/checkpoints/pi05_libero/params",
+  "supervision": "LIBERO demonstration continuation; no teacher distillation",
+  "observation": "O_t before context",
+  "context": "a[t:t+K], K uniform integer 0..9",
+  "target": "a[t+K:t+K+10]",
+  "source_window": 19,
+  "generated_actions": 10,
+  "loss": "flow matching on ten future actions only; no context reconstruction",
+  "hashes": {
+    "src/openpi/training/config.py": "6e6deecc1a809bd1c3f1a983a939f02b9a8c695b7af89a213086668607871c4e",
+    "src/openpi/training/data_loader.py": "0d26dbec9dbdebd6245831e082f204066532be9e5b2087925aba23915f6e56c0",
+    "src/openpi/models/pi0.py": "6f3b6aeedfde8183b52508f0e7889dddb014879e9825eb36fffac6031e0b6c6c",
+    "examples/libero/eval_async_future.py": "9a670ea42ce7b54aa761708a23d2fe5f8aff8f4da2aa466de28eb3484628604e"
+  }
+}
