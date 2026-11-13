@@ -137,109 +137,18 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    context_horizon = data_config.action_context_horizon
-    if context_horizon and not 0 < context_horizon < action_horizon:
-        raise ValueError("action_context_horizon must be between 0 and action_horizon - 1")
-
-    if data_config.action_context_target_shift and not context_horizon:
-        raise ValueError("Shifted future targets require an action context horizon")
-    window_size = action_horizon + (context_horizon if data_config.action_context_target_shift else 0)
-
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(window_size)] for key in data_config.action_sequence_keys
+            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
-
-    if context_horizon:
-        if tuple(data_config.action_sequence_keys) != ("actions",):
-            raise ValueError("Async action context currently requires action_sequence_keys=('actions',)")
-        dataset = ValidActionWindowDataset(dataset, window_size)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
     return dataset
-
-
-class ValidActionWindowDataset(Dataset):
-    """Drops LeRobot indices whose action window would cross an episode boundary."""
-
-    def __init__(self, dataset: Dataset, window_size: int):
-        self._dataset = dataset
-        episode_ranges = dataset.episode_data_index
-        starts = np.asarray(episode_ranges["from"])
-        ends = np.asarray(episode_ranges["to"])
-        valid_indices = [
-            np.arange(int(start), int(end) - window_size + 1, dtype=np.int64)
-            for start, end in zip(starts, ends, strict=True)
-            if int(end) - int(start) >= window_size
-        ]
-        self._indices = np.concatenate(valid_indices) if valid_indices else np.empty((0,), dtype=np.int64)
-        if not len(self._indices):
-            raise ValueError(f"No episodes contain a complete {window_size}-step action window")
-
-    def __getitem__(self, index: SupportsIndex):
-        return self._dataset[int(self._indices[index])]
-
-    def __len__(self) -> int:
-        return len(self._indices)
-
-
-def split_action_window(
-    action_window: np.ndarray,
-    *,
-    action_horizon: int,
-    context_horizon: int,
-    context_steps: int | None = None,
-    target_after_context: bool = False,
-) -> dict[str, np.ndarray]:
-    """Pack clean context; optionally supervise only its ten-step continuation."""
-    if not 0 <= context_horizon < action_horizon:
-        raise ValueError("context_horizon must be between 0 and action_horizon - 1")
-    expected_window = action_horizon + (context_horizon if target_after_context else 0)
-    if action_window.shape[0] != expected_window:
-        raise ValueError(f"Expected a {expected_window}-step source window, got {action_window.shape[0]}")
-    if context_steps is None:
-        context_steps = int(np.random.randint(context_horizon + 1))
-    if not 0 <= context_steps <= context_horizon:
-        raise ValueError(f"context_steps must be in [0, {context_horizon}], got {context_steps}")
-
-    action_context = np.zeros((context_horizon, *action_window.shape[1:]), dtype=action_window.dtype)
-    action_context[:context_steps] = action_window[:context_steps]
-    action_context_mask = np.arange(context_horizon) < context_steps
-    return {
-        "actions": (action_window[context_steps : context_steps + action_horizon].copy()
-                    if target_after_context else action_window),
-        "action_context": action_context,
-        "action_context_mask": action_context_mask,
-    }
-
-
-class ActionContextDataset(Dataset):
-    def __init__(self, dataset: Dataset, action_horizon: int, context_horizon: int, *,
-                 target_after_context: bool = False):
-        self._dataset = dataset
-        self._action_horizon = action_horizon
-        self._context_horizon = context_horizon
-        self._target_after_context = target_after_context
-
-    def __getitem__(self, index: SupportsIndex):
-        item = dict(self._dataset[index])
-        item.update(
-            split_action_window(
-                np.asarray(item["actions"]),
-                action_horizon=self._action_horizon,
-                context_horizon=self._context_horizon,
-                target_after_context=self._target_after_context,
-            )
-        )
-        return item
-
-    def __len__(self) -> int:
-        return len(self._dataset)
 
 
 def create_rlds_dataset(
@@ -332,12 +241,6 @@ def create_data_loader(
     """
     data_config = config.data.create(config.assets_dirs, config.model)
     logging.info(f"data_config: {data_config}")
-    model_context_horizon = getattr(config.model, "action_context_horizon", 0)
-    if model_context_horizon != data_config.action_context_horizon:
-        raise ValueError(
-            "Model and data action_context_horizon must match, got "
-            f"{model_context_horizon} and {data_config.action_context_horizon}"
-        )
 
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
@@ -396,13 +299,7 @@ def create_torch_data_loader(
             execute in the main process.
         seed: The seed to use for shuffling the data.
     """
-    context_horizon = data_config.action_context_horizon
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
-    if context_horizon:
-        dataset = ActionContextDataset(
-            dataset, action_horizon, context_horizon,
-            target_after_context=data_config.action_context_target_shift,
-        )
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks

@@ -454,6 +454,8 @@ def convert_pi0_checkpoint(
             "action_time_mlp_out",
         ]
 
+    if model_config.action_context_horizon:
+        keys.append("action_context_in_proj")
     projection_params = {}
     for key in keys:
         kernel_params = initial_params["projection_params"][key]["kernel"]
@@ -517,7 +519,14 @@ def convert_pi0_checkpoint(
     all_params = {**paligemma_params, **gemma_params, **projection_params}
 
     # Load state dict
-    pi0_model.load_state_dict(all_params, strict=False)
+    incompatible = pi0_model.load_state_dict(all_params, strict=False)
+    # JAX PI0 checkpoints contain transformer features, not the unused LM heads.
+    allowed_missing = {
+        "paligemma_with_expert.paligemma.lm_head.weight",
+        "paligemma_with_expert.gemma_expert.lm_head.weight",
+    }
+    if set(incompatible.missing_keys) - allowed_missing or incompatible.unexpected_keys:
+        raise ValueError(f"Checkpoint conversion mismatch: {incompatible}")
 
     if precision == "float32":
         pi0_model = pi0_model.to(torch.float32)
@@ -533,7 +542,9 @@ def convert_pi0_checkpoint(
     safetensors.torch.save_model(pi0_model, os.path.join(output_path, "model.safetensors"))
 
     # Copy assets folder if it exists
-    assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
+    assets_source = pathlib.Path(checkpoint_dir) / "assets"
+    if not assets_source.exists():
+        assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
     if assets_source.exists():
         assets_dest = pathlib.Path(output_path) / "assets"
         if assets_dest.exists():

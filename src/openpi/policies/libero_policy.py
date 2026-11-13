@@ -73,10 +73,6 @@ class LiberoInputs(transforms.DataTransformFn):
         # Actions are only available during training.
         if "actions" in data:
             inputs["actions"] = data["actions"]
-        if "action_context" in data:
-            inputs["action_context"] = data["action_context"]
-        if "action_context_mask" in data:
-            inputs["action_context_mask"] = data["action_context_mask"]
 
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
@@ -84,6 +80,9 @@ class LiberoInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        for key in ("action_context", "action_context_mask"):
+            if key in data:
+                inputs[key] = data[key]
         return inputs
 
 

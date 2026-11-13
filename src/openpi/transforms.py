@@ -338,8 +338,6 @@ class PadStatesAndActions(DataTransformFn):
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
-        if "action_context" in data:
-            data["action_context"] = pad_to_dim(data["action_context"], self.model_action_dim, axis=-1)
         return data
 
 

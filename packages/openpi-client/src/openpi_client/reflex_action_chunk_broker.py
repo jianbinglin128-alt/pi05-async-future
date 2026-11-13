@@ -37,6 +37,7 @@ class ReflexActionChunkBroker(_base_policy.BasePolicy):
         state_key: str = "state",
         action_key: str = "actions",
         state_predictor: Optional[Callable] = None,
+        action_context: bool = False,
     ):
         if action_horizon < 2 or not 1 <= overlap_steps < action_horizon:
             raise ValueError("Require action_horizon >= 2 and 1 <= overlap_steps < action_horizon")
@@ -50,6 +51,7 @@ class ReflexActionChunkBroker(_base_policy.BasePolicy):
         self._state_key = state_key
         self._action_key = action_key
         self._state_predictor = state_predictor
+        self._action_context = action_context
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reflex-inference")
         self._pending: Optional[Future] = None
         self._current: Optional[dict] = None
@@ -69,7 +71,10 @@ class ReflexActionChunkBroker(_base_policy.BasePolicy):
         actions = np.asarray(result[self._action_key])
         if actions.ndim < 2 or actions.shape[0] < self._horizon:
             raise ValueError("Policy must return at least action_horizon actions")
-        result[self._action_key] = actions[: self._horizon]
+        skip = len(observation.get("action_context", [])) if self._action_context else 0
+        if actions.shape[0] < self._horizon + skip:
+            raise ValueError("Policy horizon must include overlap plus executable chunk")
+        result[self._action_key] = actions[skip : skip + self._horizon]
         with self._metrics_lock:
             self.inference_records.append(
                 {
@@ -95,6 +100,8 @@ class ReflexActionChunkBroker(_base_policy.BasePolicy):
 
     def _prepare_observation(self, obs):
         observation = copy.deepcopy(obs)
+        if self._action_context:
+            observation["action_context"] = np.asarray(self._current[self._action_key])[self._index :].copy()
         if self._predict_future_state:
             state = np.asarray(observation[self._state_key])
             actions = np.asarray(self._current[self._action_key])

@@ -77,6 +77,29 @@ def test_truncates_predicted_horizon_to_executed_horizon():
         broker.close()
 
 
+def test_action_context_sends_two_queued_actions_and_skips_overlap_predictions():
+    class ContextPolicy:
+        def __init__(self):
+            self.observations = []
+
+        def infer(self, obs):
+            self.observations.append(obs)
+            start = obs["step"]
+            return {"actions": np.arange(start, start + 10, dtype=np.float32)[:, None]}
+
+    policy = ContextPolicy()
+    broker = ReflexActionChunkBroker(policy, 5, overlap_steps=2, action_context=True)
+    try:
+        values = [broker.infer({"step": step})["actions"].item() for step in range(16)]
+        assert values == list(range(16))
+        assert [obs["step"] for obs in policy.observations] == [0, 3, 8, 13]
+        assert "action_context" not in policy.observations[0]
+        for obs in policy.observations[1:]:
+            np.testing.assert_array_equal(obs["action_context"][:, 0], [obs["step"], obs["step"] + 1])
+    finally:
+        broker.close()
+
+
 @pytest.mark.parametrize("overlap", [1, 2])
 def test_five_step_chunks_submit_observations_before_remaining_actions(overlap):
     class RecordingPolicy:

@@ -21,7 +21,12 @@ class DenoisingRunner:
         self.captures = 0
         self.replays = 0
 
-    def prepare(self, state, mask, prefix, noise, offset, num_steps, *, cuda_graph):
+    def prepare(self, state, mask, prefix, noise, offset, num_steps, *, cuda_graph,
+                action_context=None, action_context_mask=None):
+        context_horizon = getattr(self.step_fn.__self__.config, "action_context_horizon", 0)
+        if context_horizon and action_context is None:
+            action_context = state.new_zeros((state.shape[0], context_horizon, state.shape[-1]))
+            action_context_mask = torch.zeros(action_context.shape[:2], device=state.device, dtype=torch.bool)
         key = (
             tuple(state.shape),
             tuple(mask.shape),
@@ -32,10 +37,11 @@ class DenoisingRunner:
             prefix[0][0].dtype,
             num_steps,
             cuda_graph,
+            context_horizon,
         )
         entry = self.entry
         if entry is None or entry["key"] != key:
-            suffix_length = noise.shape[1] + (0 if self.step_fn.__self__.pi05 else 1)
+            suffix_length = noise.shape[1] + context_horizon + (0 if self.step_fn.__self__.pi05 else 1)
             entry = {
                 "key": key,
                 "state": torch.empty_like(state),
@@ -49,11 +55,17 @@ class DenoisingRunner:
                 ),
                 "graph": None,
             }
+            if context_horizon:
+                entry["action_context"] = torch.empty_like(action_context)
+                entry["action_context_mask"] = torch.empty_like(action_context_mask)
             self.entry = entry
         entry["state"].copy_(state)
         entry["mask"].copy_(mask)
         entry["noise"].copy_(noise)
         entry["offset"].copy_(offset)
+        if context_horizon:
+            entry["action_context"].copy_(action_context)
+            entry["action_context_mask"].copy_(action_context_mask)
         entry["prefix"].copy_prefix([pair[0] for pair in prefix], [pair[1] for pair in prefix])
         return entry
 
@@ -75,6 +87,9 @@ class DenoisingRunner:
                     x_t,
                     timestep,
                     prefix_position_offset=entry["offset"],
+                    **({"action_context": entry["action_context"],
+                        "action_context_mask": entry["action_context_mask"]}
+                       if "action_context" in entry else {}),
                 )
                 x_t = x_t + dt * velocity
             return x_t

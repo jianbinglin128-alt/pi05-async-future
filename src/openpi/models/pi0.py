@@ -160,24 +160,11 @@ class Pi0(_model.BaseModel):
             ar_mask += [True]
 
         if self.action_context_horizon:
-            if obs.action_context is None:
-                action_context = jnp.zeros(
-                    (obs.state.shape[0], self.action_context_horizon, self.action_dim), dtype=obs.state.dtype
-                )
-                action_context_mask = jnp.zeros((obs.state.shape[0], self.action_context_horizon), dtype=jnp.bool_)
-            else:
-                action_context = obs.action_context
-                action_context_mask = obs.action_context_mask
-                if action_context_mask is None:
-                    raise ValueError("action_context_mask is required when action_context is provided")
-                if action_context.shape[1] != self.action_context_horizon:
-                    raise ValueError(
-                        f"Expected {self.action_context_horizon} action context slots, got {action_context.shape[1]}"
-                    )
-            context_tokens = self.action_context_in_proj(action_context)
+            if obs.action_context is None or obs.action_context_mask is None:
+                raise ValueError("action_context and its mask must be packed before inference")
+            context_tokens = self.action_context_in_proj(obs.action_context)
             tokens.append(context_tokens)
-            input_mask.append(action_context_mask)
-            # Context actions form a bidirectional block before the generated action block.
+            input_mask.append(obs.action_context_mask)
             ar_mask += [True] + [False] * (self.action_context_horizon - 1)
 
         action_tokens = self.action_in_proj(noisy_actions)
@@ -202,7 +189,7 @@ class Pi0(_model.BaseModel):
             adarms_cond = None
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
-        # Image/language/state inputs and context actions do not attend to generated actions.
+        # image/language/state inputs do not attend to action tokens
         ar_mask += [True] + ([False] * (self.action_horizon - 1))
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
@@ -233,8 +220,6 @@ class Pi0(_model.BaseModel):
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
-        # Context tokens are clean conditioning only. These last ten tokens
-        # predict the dataset-provided target (after context in the future variant).
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)

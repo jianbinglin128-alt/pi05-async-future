@@ -103,6 +103,8 @@ class PI0Pytorch(nn.Module):
 
         self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
+        if config.action_context_horizon:
+            self.action_context_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
 
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
@@ -273,7 +275,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, state, noisy_actions, timestep):
+    def embed_suffix(self, state, noisy_actions, timestep, action_context=None, action_context_mask=None):
         """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing."""
         embs = []
         pad_masks = []
@@ -343,6 +345,16 @@ class PI0Pytorch(nn.Module):
             action_time_emb = action_emb
             adarms_cond = time_emb
 
+        if self.config.action_context_horizon:
+            if action_context is None:
+                action_context = state.new_zeros((state.shape[0], self.config.action_context_horizon, self.config.action_dim))
+                action_context_mask = torch.zeros(action_context.shape[:2], dtype=torch.bool, device=state.device)
+            if action_context_mask is None:
+                raise ValueError("action_context_mask is required")
+            context_emb = self.action_context_in_proj(action_context.to(self.action_context_in_proj.weight.dtype))
+            embs.append(context_emb)
+            pad_masks.append(action_context_mask)
+
         # Add to input tokens
         embs.append(action_time_emb)
 
@@ -357,6 +369,9 @@ class PI0Pytorch(nn.Module):
         pad_masks = torch.cat(pad_masks, dim=1)
         suffix_positions = torch.arange(embs.shape[1], device=embs.device)
         att_masks = suffix_positions == 0 if self.pi05 else suffix_positions <= 1
+        if self.config.action_context_horizon:
+            action_start = self.config.action_context_horizon + (0 if self.pi05 else 1)
+            att_masks = att_masks | (suffix_positions == action_start)
         att_masks = att_masks[None, :].expand(bsize, -1)
 
         return embs, pad_masks, att_masks, adarms_cond
@@ -376,7 +391,9 @@ class PI0Pytorch(nn.Module):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(
+            state, x_t, time, observation.action_context, observation.action_context_mask
+        )
         first_attention = self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn
         first_projection = getattr(first_attention, "qkv_proj", None) or first_attention.q_proj
         if first_projection.weight.dtype == torch.bfloat16:
@@ -464,6 +481,8 @@ class PI0Pytorch(nn.Module):
             offset,
             num_steps,
             cuda_graph=cuda_graph,
+            action_context=observation.action_context,
+            action_context_mask=observation.action_context_mask,
         )
         x_t = self._denoising_runner.run(entry, num_steps, cuda_graph=cuda_graph)
         if self.profile_inference:
@@ -488,9 +507,13 @@ class PI0Pytorch(nn.Module):
         x_t,
         timestep,
         prefix_position_offset=None,
+        action_context=None,
+        action_context_mask=None,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(
+            state, x_t, timestep, action_context, action_context_mask
+        )
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
@@ -638,6 +661,8 @@ class PI0Pytorch(nn.Module):
             next_position,
             num_steps,
             cuda_graph=cuda_graph,
+            action_context=observation.action_context,
+            action_context_mask=observation.action_context_mask,
         )
         if self.profile_inference:
             if noise.device.type == "cuda":

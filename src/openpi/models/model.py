@@ -94,10 +94,6 @@ class Observation(Generic[ArrayT]):
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
 
-    # Optional normalized actions already queued for execution. Padding slots are masked.
-    action_context: at.Float[ArrayT, "*b k ad"] | None = None
-    action_context_mask: at.Bool[ArrayT, "*b k"] | None = None
-
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
     # Tokenized prompt mask.
@@ -109,6 +105,8 @@ class Observation(Generic[ArrayT]):
     token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+    action_context: at.Float[ArrayT, "*b k ad"] | None = None
+    action_context_mask: at.Bool[ArrayT, "*b k"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -238,7 +236,7 @@ class BaseModelConfig(abc.ABC):
     def create(self, rng: at.KeyArrayLike) -> "BaseModel":
         """Create a new model, initializing parameters."""
 
-    def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "BaseModel":
+    def load(self, params: at.Params, *, remove_extra_params: bool = False) -> "BaseModel":
         """Create a model with the given parameters."""
         model = nnx.eval_shape(self.create, jax.random.key(0))
         graphdef, state = nnx.split(model)

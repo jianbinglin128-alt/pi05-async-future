@@ -87,12 +87,6 @@ class DataConfig:
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
 
-    # When non-zero, condition the synchronous action_horizon target chunk on up to this
-    # many queued actions from its overlapping prefix.
-    action_context_horizon: int = 0
-    # Predict ten NEW actions after the fixed context, rather than an overlapping chunk.
-    action_context_target_shift: bool = False
-
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
@@ -127,15 +121,6 @@ class ModelTransformFactory(GroupFactory):
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
-                        *(
-                            [
-                                _transforms.PackActionContext(
-                                    model_config.action_context_horizon, model_config.action_dim
-                                )
-                            ]
-                            if getattr(model_config, "action_context_horizon", 0)
-                            else []
-                        ),
                     ],
                 )
             case _model.ModelType.PI05:
@@ -149,15 +134,8 @@ class ModelTransformFactory(GroupFactory):
                             discrete_state_input=model_config.discrete_state_input,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
-                        *(
-                            [
-                                _transforms.PackActionContext(
-                                    model_config.action_context_horizon, model_config.action_dim
-                                )
-                            ]
-                            if getattr(model_config, "action_context_horizon", 0)
-                            else []
-                        ),
+                        *([_transforms.PackActionContext(model_config.action_context_horizon, model_config.action_dim)]
+                          if model_config.action_context_horizon else []),
                     ],
                 )
             case _model.ModelType.PI0_FAST:
@@ -322,17 +300,19 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # For your own dataset, first figure out what keys your environment passes to the policy server
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
-        repack_structure = {
-            "observation/image": "image",
-            "observation/wrist_image": "wrist_image",
-            "observation/state": "state",
-            "actions": "actions",
-            "prompt": "prompt",
-        }
-        if getattr(model_config, "action_context_horizon", 0):
-            repack_structure["action_context"] = "action_context"
-            repack_structure["action_context_mask"] = "action_context_mask"
-        repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack_structure)])
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
 
         # The data transforms are applied to the data coming from the dataset *and* during inference.
         # Below, we define the transforms for data going into the model (``inputs``) and the transforms
@@ -804,30 +784,6 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
-    TrainConfig(
-        name="pi05_libero_async_context",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True, action_context_horizon=9),
-        data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True, action_context_horizon=9),
-            extra_delta_transform=False,
-        ),
-        batch_size=12,
-        num_workers=8,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True, action_horizon=10, discrete_state_input=True, action_context_horizon=9
-        ).get_async_context_freeze_filter(),
-        num_train_steps=30_000,
-    ),
     #
     # Fine-tuning Aloha configs.
     #
@@ -1037,45 +993,14 @@ _CONFIGS = [
     *polaris_config.get_polaris_configs(),
 ]
 
-
-# Async action context initialized from the LIBERO policy. Keep its original
-# image/prompt input contract: no additional discrete proprioception tokens.
-_libero_async_source = next(c for c in _CONFIGS if c.name == "pi05_libero_async_context")
-_libero_async_model = dataclasses.replace(_libero_async_source.model, discrete_state_input=False)
+# Future-target checkpoint: queued actions condition ten predictions AFTER them.
 _CONFIGS.append(dataclasses.replace(
-    _libero_async_source,
-    name="pi05_libero_async_context_from_libero",
-    model=_libero_async_model,
-    freeze_filter=_libero_async_model.get_async_context_freeze_filter(),
-    weight_loader=weight_loaders.CheckpointWeightLoader(
-        "/home/lin/data/openpi/checkpoints/pi05_libero/params"
-    ),
-    lr_schedule=_optimizer.CosineDecaySchedule(
-        warmup_steps=1000, peak_lr=1e-5, decay_steps=30000, decay_lr=1e-6
-    ),
-    batch_size=12,
-    fsdp_devices=2,
-))
-
-
-# Fixed clean context -> a full ten-action continuation after that context.
-_future_source = next(c for c in _CONFIGS if c.name == "pi05_libero_async_context_from_libero")
-_CONFIGS.append(dataclasses.replace(
-    _future_source,
+    next(c for c in _CONFIGS if c.name == "pi05_libero"),
     name="pi05_libero_async_future",
-    data=dataclasses.replace(
-        _future_source.data,
-        base_config=dataclasses.replace(
-            _future_source.data.base_config,
-            action_context_target_shift=True,
-        ),
-    ),
-    policy_metadata={
-        **(_future_source.policy_metadata or {}),
-        "action_target_alignment": "after_context",
-        "action_context_horizon": 9,
-        "action_horizon": 10,
-    },
+    model=pi0_config.Pi0Config(pi05=True, action_horizon=10,
+        discrete_state_input=False, action_context_horizon=9),
+    policy_metadata={"action_target_alignment": "future", "predicted_steps": 10,
+                     "executed_steps": 5, "overlap_steps": 2, "pre_inference_steps": 3},
 ))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

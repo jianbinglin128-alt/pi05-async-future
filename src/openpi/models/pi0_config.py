@@ -31,7 +31,6 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
-    # Number of fixed action-context slots used by asynchronous chunk training.
     action_context_horizon: int = 0
 
     pytorch_compile_mode: str | None = "max-autotune"
@@ -82,17 +81,16 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
-                action_context=(
-                    jax.ShapeDtypeStruct([batch_size, self.action_context_horizon, self.action_dim], jnp.float32)
-                    if self.action_context_horizon
-                    else None
-                ),
-                action_context_mask=(
-                    jax.ShapeDtypeStruct([batch_size, self.action_context_horizon], bool)
-                    if self.action_context_horizon
-                    else None
-                ),
             )
+        with at.disable_typechecking():
+            if self.action_context_horizon:
+                observation_spec = dataclasses.replace(
+                    observation_spec,
+                    action_context=jax.ShapeDtypeStruct(
+                        [batch_size, self.action_context_horizon, self.action_dim], jnp.float32),
+                    action_context_mask=jax.ShapeDtypeStruct(
+                        [batch_size, self.action_context_horizon], jnp.bool_),
+                )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
         return observation_spec, action_spec
@@ -127,10 +125,3 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
-
-    def get_async_context_freeze_filter(self) -> nnx.filterlib.Filter:
-        """Freeze everything except the action expert and its action/context projections."""
-        trainable = nnx_utils.PathRegex(
-            r".*(?:llm.*_1.*|action_in_proj/.*|action_out_proj/.*|time_mlp_in/.*|time_mlp_out/.*|action_context_in_proj/.*)"
-        )
-        return nnx.Not(trainable)
